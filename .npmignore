@@ -1,0 +1,12 @@
+# npm pack/publish ships only dist/ (see "files" in package.json); this is a second fence.
+src/
+test/
+scripts/
+build-test/
+node_modules/
+*.log
+.env*
+connector.env
+connector.json
+state.json
+tsconfig*.json

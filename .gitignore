@@ -1,0 +1,16 @@
+# build output
+node_modules/
+dist/
+build-test/
+# never publish local state, secrets, logs or models
+.env
+.env.*
+connector.env
+connector.json
+state.json
+*.log
+*.part
+*.pid
+models/
+venvs/
+.DS_Store

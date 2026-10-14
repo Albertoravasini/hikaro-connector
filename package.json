@@ -1,0 +1,35 @@
+{
+  "name": "hikaro-connector",
+  "version": "0.1.0",
+  "description": "Connettore Hikaro: collega il Deck (app iPhone o dispositivo) agli agenti Hermes sul Mac.",
+  "private": true,
+  "type": "module",
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "hikaro-connector": "dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json && chmod +x dist/index.js",
+    "dev": "npm run build && node dist/index.js start",
+    "demo": "npm run build && node dist/index.js start --demo",
+    "test": "tsc -p tsconfig.test.json && node --test --test-reporter=spec \"build-test/test/**/*.test.js\"",
+    "typecheck": "tsc -p tsconfig.test.json --noEmit",
+    "clean": "rm -rf dist build-test",
+    "e2e": "tsc -p tsconfig.test.json && node build-test/scripts/e2e.js"
+  },
+  "dependencies": {
+    "qrcode-terminal": "0.12.0",
+    "ws": "8.22.0"
+  },
+  "devDependencies": {
+    "@types/node": "22.18.0",
+    "@types/ws": "8.18.1",
+    "typescript": "5.9.3"
+  }
+}
