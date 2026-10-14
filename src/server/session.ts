@@ -9,7 +9,7 @@ import { logger } from "../core/log.js";
 const log = logger("device");
 
 /** 60 s of PCM16 mono 16 kHz. Longer recordings are truncated. */
-export const MAX_RECORDING_BYTES = SAMPLE_RATE * 2 * 60;
+export const MAX_RECORDING_BYTES = SAMPLE_RATE * 2 * 300; // 5 min, the app's longest key-hold recording
 
 interface Recording {
   agent: string;

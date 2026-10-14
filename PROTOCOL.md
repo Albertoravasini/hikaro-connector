@@ -40,7 +40,8 @@ hikaro://pair?v=1&host=192.168.1.20&port=8787&token=<token>&name=Mac-mini&ts=<ta
 
 ```ts
 AgentState = "off" | "working" | "calling" | "done"
-// off = LED spento · working = respira · calling = lampeggia (ti cerca) · done = verde fisso
+// off = LED spento · working = fisso · done = lampeggio lento (ha finito) · calling = lampeggio veloce (ti cerca)
+// (l'app mostra anche «risposta da ascoltare» col lampeggio lento finché non la apri)
 
 CardKind = "request" | "reply" | "done" | "listening"
 
