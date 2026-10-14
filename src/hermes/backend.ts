@@ -78,6 +78,11 @@ export interface HermesBackendOpts {
   overrides: Record<string, AgentOverride>;
   state: StateStore;
   instructions?: string;
+  /**
+   * Discord session ids that belong to OTHER profiles (a multiplexed gateway keeps every
+   * profile's sessions in the default state.db, and the API lists them all).
+   */
+  foreignSessions?: (agentId: string) => Promise<Set<string>>;
 }
 
 export class HermesBackend implements AgentBackend {
@@ -164,9 +169,18 @@ export class HermesBackend implements AgentBackend {
   async listSessions(agentId: string): Promise<BackendSession[]> {
     const client = this.client(agentId);
     const ep = this.endpoints.find((e) => e.id === agentId);
-    const rows = await client.listSessions(EXTERNAL_SOURCE, 30);
+    const foreign = await this.foreign(agentId);
+    const rows = (await client.listSessions(EXTERNAL_SOURCE, foreign.size ? 100 : 30)).filter((r) => !foreign.has(r.id)).slice(0, 30);
     const origins = ep?.home ? readSessionOrigins(ep.home) : new Map();
     return rows.map((r) => toDeckSession(r, origins.get(r.id))).sort((a, b) => b.updated - a.updated);
+  }
+
+  private async foreign(agentId: string): Promise<Set<string>> {
+    try {
+      return (await this.o.foreignSessions?.(agentId)) ?? new Set();
+    } catch {
+      return new Set();
+    }
   }
 
   /** Session id for the next message, following the key's selection. */
@@ -174,7 +188,8 @@ export class HermesBackend implements AgentBackend {
     const sel = this.getSelection(agentId);
     if (sel === "latest") {
       try {
-        const latest = (await this.client(agentId).listSessions(EXTERNAL_SOURCE, 1))[0];
+        const foreign = await this.foreign(agentId);
+        const latest = (await this.client(agentId).listSessions(EXTERNAL_SOURCE, foreign.size ? 50 : 1)).find((r) => !foreign.has(r.id));
         if (latest) return { id: latest.id, deck: false };
       } catch (err) {
         if (err instanceof DeckError && err.code === "hermes_down") throw err;

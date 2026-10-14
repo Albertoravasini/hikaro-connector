@@ -19,6 +19,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ensureEnvFile, hermesHome, loadConfig, loadConnectorFile, paths, readEnvFile } from "../config.js";
+import { acpHandshake, hasModelProvider, hermesAcpCommand } from "../hermes/acp.js";
 import { HermesClient } from "../hermes/client.js";
 import { applyEnvChanges, planSetup } from "../hermes/envfile.js";
 import { isMultiplexOn, listProfiles, readProfileKey } from "../hermes/profiles.js";
@@ -45,6 +46,8 @@ function run(cmd: string, args: string[], timeoutMs = 60_000): Promise<{ code: n
 }
 
 export async function findHermes(): Promise<string | null> {
+  const forced = process.env.HIKARO_HERMES_BIN;
+  if (forced && existsSync(forced)) return forced;
   const local = join(homedir(), ".local", "bin", "hermes");
   if (existsSync(local)) return local;
   const r = await run("/bin/sh", ["-lc", "command -v hermes"], 5_000);
@@ -120,8 +123,25 @@ export async function runSetup(o: SetupOpts = {}): Promise<number> {
     const multiplex = isMultiplexOn(hHome);
     const plan = planSetup(profiles, multiplex, readProfileKey);
     ok(`${profiles.length} ${profiles.length === 1 ? "profilo" : "profili"} Hermes: ${profiles.map((x) => x.name).join(", ")}`);
-    if (multiplex) warn("Hermes usa un solo gateway per tutti i profili (multiplex): collego solo il profilo default.");
-    for (const s of plan.skipped) warn(`${s.profile}: ${s.reason}`);
+    if (multiplex && plan.skipped.length) {
+      // Secondary profiles cannot have an API server here: the connector talks to them via ACP.
+      const others = plan.skipped.map((x) => x.profile).join(", ");
+      if (dry || !hermesBin) {
+        info(`Hermes usa un solo gateway per tutti i profili (multiplex): default via API, ${others} via ACP (hermes -p <profilo> acp).`);
+      } else {
+        const first = plan.skipped[0]!.profile;
+        const hs = await acpHandshake(hermesAcpCommand(hermesBin, hHome, first), 90_000);
+        if (hs.ok) {
+          ok(`Hermes usa un solo gateway per tutti i profili (multiplex): default via API, ${others} via ACP (${first} risponde in ${(hs.ms / 1000).toFixed(1)} s)`);
+          if (!hasModelProvider(hs.init)) warn(`${first}: Hermes non ha un modello configurato per questo profilo. Nel Terminale: hermes -p ${first} model`);
+        } else {
+          warn(`Hermes usa un solo gateway per tutti i profili (multiplex) e ACP non risponde: per ora raggiungo solo il profilo default.`);
+          info(`Prova nel Terminale: hermes -p ${first} acp --check   (dettaglio: ${(hs.error ?? "").slice(0, 160)})`);
+        }
+      }
+    } else {
+      for (const s of plan.skipped) warn(`${s.profile}: ${s.reason}`);
+    }
 
     for (const pp of plan.profiles) {
       const changed = Object.keys(pp.changes).length > 0;

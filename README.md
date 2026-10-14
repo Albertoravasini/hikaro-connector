@@ -3,7 +3,8 @@
 Il servizio che gira sul Mac Mini e collega il **Deck** (oggi l'app iPhone, domani il dispositivo) agli agenti **Hermes**. Parla il protocollo di [`protocol/README.md`](PROTOCOL.md): WebSocket sulla porta 8787, schede, voce, LED.
 
 ```
-iPhone/Deck ──WebSocket──▶ connettore ──HTTP──▶ Hermes API (un profilo = un agente = un tasto)
+iPhone/Deck ──WebSocket──▶ connettore ──HTTP──▶ Hermes API     (profilo con API server, di solito default)
+                                       └─stdio─▶ hermes -p X acp (tutti gli altri profili; un profilo = un agente = un tasto)
    voce PCM 16 kHz          STT · schede · TTS · push (APNs)
 ```
 
@@ -20,7 +21,8 @@ curl -fsSL https://raw.githubusercontent.com/Albertoravasini/hikaro-connector/ma
 
 L'installer trova un Node 20+ (quello nel PATH, quello che porta Hermes in `~/.hermes/node`, altrimenti ne scarica
 uno da nodejs.org in `~/.hikaro/node`, senza sudo), installa in `~/.hikaro/connector`, poi `hikaro-connector setup`:
-- accende l'API di Hermes per ogni profilo (copia di sicurezza del `.env`) e **riavvia il gateway senza perdere Discord**:
+- accende l'API di Hermes per ogni profilo che può averla, con copia di sicurezza del `.env` (con multiplex solo
+  `default`: gli altri profili li raggiunge via ACP, e prova che risponda) e **riavvia il gateway senza perdere Discord**:
   se è il servizio launchd di Hermes usa `hermes gateway restart` (finisce i lavori in corso, poi `launchctl kickstart`);
   se il gateway è acceso a mano non lo tocca e dice cosa fare; se non c'è lo installa come servizio;
 - installa la voce locale: `brew install whisper-cpp` se manca, modelli in `~/.hikaro/models` (download che riprende
@@ -70,7 +72,7 @@ In modalità demo: Outreach, Assistente, Startup, Dev rispondono con testo di pr
 | `HIKARO_PORT` | porta del connettore (8787) |
 | `APNS_KEY_PATH`, `APNS_KEY_ID`, `APNS_TEAM_ID` | notifiche push e Live Activity (facoltative, bundle `app.hikaro.deck`) |
 
-Altri file in `~/.hikaro` (tutti `0600`): `connector.json` (token di abbinamento, nomi/colori/tasti degli agenti in `agents`), `state.json` (sessione Hermes per agente, conversazione scelta per tasto, token push), `connector.log`. Voce locale: `models/` (Whisper, VAD, cache HF di Kokoro), `venvs/voice/`, `run/*.pid` (per fermare server rimasti dopo un crash).
+Altri file in `~/.hikaro` (tutti `0600`): `connector.json` (token di abbinamento; in `agents.<profilo>`: `name`, `color`, `key`, `hidden`, `backend` `"api"`/`"acp"`), `state.json` (sessione Hermes per agente, sessioni ACP e sottochat collegate, nomi dei bot in cache, conversazione scelta per tasto, token push), `connector.log`. Voce locale: `models/` (Whisper, VAD, cache HF di Kokoro), `venvs/voice/`, `run/*.pid` (per fermare server rimasti dopo un crash).
 
 ## Voce locale (misurata su M3 Pro, frasi italiane vere)
 
@@ -86,15 +88,35 @@ Le risposte vengono tagliate in frasi (≤220 caratteri per Kokoro) e la prima v
 
 ## Come parla con Hermes (v0.18.2)
 
-- **Un profilo = un agente.** L'API server di Hermes non ha instradamento per profilo: ogni profilo ha il suo gateway e la sua porta (`API_SERVER_PORT`: default 8642, gli altri 8643, 8644…). Il setup scrive `API_SERVER_ENABLED`, `API_SERVER_KEY`, `API_SERVER_PORT` nel `.env` di ogni profilo e (ri)avvia `hermes [-p profilo] gateway`. Con `gateway.multiplex_profiles` attivo è raggiungibile solo il profilo default.
-- Ogni messaggio va a `POST /v1/runs` con il `session_id` della conversazione scelta per quel tasto (predefinita: una
-  fissa del Deck; la cronologia viene da `/api/sessions/{id}/messages`) e `instructions` = [istruzioni Hikaro](src/cards/instructions.ts) (risposte brevi, ≤3 opzioni).
-- **Conversazioni (sottochat Discord)**: `sessions.list` legge `GET /api/sessions?source=discord` (più recenti prima) e
-  arricchisce i titoli con i nomi canale/thread da `<profilo>/sessions/sessions.json` (sola lettura). Verificato nel
-  codice di Hermes: un run con il `session_id` di una sottochat aggiunge i turni a quella stessa sessione in `state.db`
-  (`create_session` non sovrascrive la riga), e il gateway Discord ricarica la trascrizione da `state.db` al messaggio
-  successivo: l'agente se li ricorda, ma nel canale Discord non compaiono.
-- Gli eventi arrivano da `GET /v1/runs/{id}/events`: `message.delta` → `reply` a pezzi + voce frase per frase; `approval.request` → scheda `request` («Sì, solo ora» / «Sì, per la sessione» / «No»), la scelta va a `POST /v1/runs/{id}/approval`.
+- **Ogni profilo = un agente = un tasto**, con il nome del suo bot Discord. Per ogni profilo il connettore sceglie
+  (`src/hermes/router.ts`): **API** se il profilo ha l'API server di Hermes e risponde (di solito `default`), altrimenti
+  **ACP** (`hermes -p <profilo> acp`, un processo per profilo, JSON-RPC su stdio, `src/hermes/acp.ts`). Con
+  `gateway.multiplex_profiles` attivo (un solo gateway per tutti i bot Discord) solo `default` può avere l'API: gli altri
+  passano da ACP, che non avvia Discord e quindi non disturba il gateway. Forzare: `agents.<profilo>.backend` = `"api"`
+  o `"acp"` in `~/.hikaro/connector.json`. `HIKARO_ACP_LAZY=1` avvia i processi ACP al primo messaggio invece che
+  all'avvio.
+- **Nomi**: `GET https://discord.com/api/v10/users/@me` con il `DISCORD_BOT_TOKEN` del profilo (3 s di attesa massima,
+  nome in cache in `state.json`, il token non viene mai salvato né scritto nel log); altrimenti la descrizione breve del
+  profilo o il nome del profilo con la maiuscola. Ordine dei tasti: `default` per primo, poi alfabetico (i `key` scelti
+  in `connector.json` restano).
+- **API** — il setup scrive `API_SERVER_ENABLED`, `API_SERVER_KEY`, `API_SERVER_PORT` nel `.env` di ogni profilo che può
+  averla e (ri)avvia `hermes [-p profilo] gateway`. Ogni messaggio va a `POST /v1/runs` con il `session_id` della
+  conversazione scelta (predefinita: una fissa del Deck; la cronologia viene da `/api/sessions/{id}/messages`) e
+  `instructions` = [istruzioni Hikaro](src/cards/instructions.ts). Eventi da `GET /v1/runs/{id}/events`: `message.delta`
+  → `reply` a pezzi + voce frase per frase; `approval.request` → scheda `request`, la scelta va a `POST /v1/runs/{id}/approval`.
+- **ACP** — `initialize` (nessuna capacità fs/terminale: l'agente usa i suoi strumenti), `session/new` (cwd = home),
+  `session/prompt` con le istruzioni Hikaro in testa al primo messaggio (e ogni 8), `agent_message_chunk` → `reply` a pezzi
+  + voce, `session/request_permission` → scheda «Sì, solo ora» / «Sì, per la sessione» / «No» (Hermes rifiuta da solo dopo
+  60 s), `session/cancel` all'arresto. Un errore dell'agente («Error: …») diventa `agent_failed`. Se il processo cade
+  riparte da solo (attesa crescente 1 s → 5 min); le sessioni ACP sono nello `state.db` del profilo e sopravvivono.
+  `doctor` prova l'handshake di ogni profilo ACP e avvisa se il profilo non ha un modello (`hermes -p <profilo> model`).
+- **Conversazioni (sottochat Discord)**: via API `sessions.list` legge `GET /api/sessions?source=discord` (con multiplex
+  tolte quelle degli altri profili) + i nomi canale/thread da `sessions/sessions.json`; un run con il `session_id` di una
+  sottochat aggiunge i turni a quella sessione e il gateway Discord li ricarica (l'agente se li ricorda, ma nel canale non
+  compaiono). Via ACP l'elenco è letto in sola lettura dallo `state.db` (`/usr/bin/sqlite3 -readonly`; con multiplex le
+  righe `agent:<profilo>:discord:…` dello `state.db` di default): ACP non può riaprire una sessione Discord, quindi
+  **i messaggi del Deck restano in una sottochat collegata** (una sessione ACP legata a quella sottochat, in `state.json`),
+  che al primo messaggio riceve gli ultimi ~20 messaggi della sottochat Discord come contesto e poi solo quelli nuovi.
 
 ## Schede: il blocco ```hikaro
 
@@ -122,7 +144,8 @@ src/index.ts        CLI            src/app.ts        collega tutto
 src/protocol.ts     tipi del protocollo (allineati a protocol/README.md)
 src/core/           hub (stati LED, schede, turni), interfaccia AgentBackend, errori in italiano
 src/server/         HTTP /health + WebSocket /ws, sessione per dispositivo
-src/hermes/         client API, scoperta profili, backend, modifica sicura del .env
+src/hermes/         client API, scoperta profili, backend API, backend ACP (acp.ts + jsonrpc.ts),
+                    router API/ACP, nomi dei bot, lettura sola-lettura di state.db, modifica sicura del .env
 src/demo/           backend demo         src/cards/   shaper + istruzioni agenti
 src/voice/          wav, stt, tts, frasi in streaming; local/ = whisper.cpp, mlx-audio (Kokoro/Parakeet), say, download
 src/push/           APNs (http2 + JWT ES256)   src/pairing/  QR, IP di casa, Tailscale

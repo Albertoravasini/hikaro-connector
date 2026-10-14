@@ -104,6 +104,8 @@ export interface AgentOverride {
   key?: KeyIndex | null;
   /** hide this profile from the device */
   hidden?: boolean;
+  /** force how the connector talks to this Hermes profile (default: API if reachable, else ACP) */
+  backend?: "api" | "acp";
 }
 
 export interface ConnectorFile {
@@ -147,13 +149,33 @@ export interface StateFile {
   selected: Record<string, string>;
   /** agent id → last activity of the Deck conversation (epoch ms) */
   deckUpdated: Record<string, number>;
+  /** ACP agents: agent id → ("deck" | Discord session id) → linked ACP session */
+  acp: Record<string, Record<string, AcpLink>>;
+  /** profile → Discord bot name cache (never the token: only a hash prefix of it) */
+  names: Record<string, { name: string; tokenHash: string; ts: number }>;
+}
+
+/** An ACP session the connector created for a Deck conversation (or linked to a Discord sub-chat). */
+export interface AcpLink {
+  id: string;
+  /** prompts sent so far (the Hikaro instructions go with the first one and every few turns) */
+  turns: number;
+  /** linked Discord sub-chat: newest Discord message already passed as context (epoch s) */
+  seededTs?: number;
 }
 
 export class StateStore {
   private data: StateFile;
   constructor(private readonly file: string) {
     const raw = readJson<Partial<StateFile>>(file, {});
-    this.data = { sessions: raw.sessions ?? {}, push: raw.push ?? [], selected: raw.selected ?? {}, deckUpdated: raw.deckUpdated ?? {} };
+    this.data = {
+      sessions: raw.sessions ?? {},
+      push: raw.push ?? [],
+      selected: raw.selected ?? {},
+      deckUpdated: raw.deckUpdated ?? {},
+      acp: raw.acp ?? {},
+      names: raw.names ?? {},
+    };
   }
   get(): Readonly<StateFile> {
     return this.data;

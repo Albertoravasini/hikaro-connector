@@ -111,24 +111,51 @@ Card = {
 
 ## Agenti Hermes (v0.18.2, verificato sul codice)
 
-- Un agente = un **profilo** Hermes. Il server API non ha un prefisso `/p/<profilo>`: ogni profilo
-  gira il suo gateway con la sua porta (8642 per `default`, poi 8643, 8644…), scritta nel suo `.env`.
-- Il connettore usa `/v1/runs` (+ `/events` SSE) perché solo lì esistono le approvazioni native
-  (`/v1/runs/{id}/approval`): `once` → «Sì, solo ora», `session` → «Sì, per la sessione» (oppure `always` →
-  «Sì, sempre» se `session` non c'è), `deny` → «No». Con solo `once`/`deny` le opzioni sono due.
-- Gli id agente sono i nomi dei profili; `default` si chiama «Hermes» e prende l'ultimo tasto. Un profilo
-  con nome compare solo se ha il suo `API_SERVER_PORT`; con `multiplex_profiles` attivo è raggiungibile solo `default`.
-- Una sessione fissa per agente; la cronologia arriva da `/api/sessions/{id}/messages`.
+- Un agente = un **profilo** Hermes, e **ogni** profilo diventa un agente (anche con `gateway.multiplex_profiles`
+  attivo, quando un solo gateway fa girare tutti i bot Discord). Il connettore sceglie per ogni profilo come parlarci:
+  - **API** (`/v1/runs` + `/events` SSE) se il profilo ha l'API server di Hermes e risponde: di solito `default`
+    (porta 8642; senza multiplex anche gli altri profili con la loro porta 8643, 8644…). Il server API non ha un
+    prefisso `/p/<profilo>`: con multiplex solo `default` può averlo.
+  - **ACP** (Agent Client Protocol) per tutti gli altri: un processo `hermes -p <profilo> acp` per profilo, sempre
+    acceso, JSON-RPC su stdio. È lo stesso agente (configurazione, memoria, skill, modello, server MCP del profilo) ma
+    non avvia Discord, quindi non litiga col gateway. Gli strumenti sono quelli «da editor» di Hermes (terminale, file,
+    web, browser, memoria, skill, delegate…), senza invio di messaggi né cron.
+  - In `~/.hikaro/connector.json` → `agents.<profilo>.backend: "api" | "acp"` forza la scelta. Un agente passato
+    all'API ci resta (un riavvio del gateway non sposta la sua chat).
+- **Nomi veri**: ogni agente si chiama come il suo bot Discord (`global_name` o `username` di `GET /users/@me` con il
+  `DISCORD_BOT_TOKEN` del `.env` del profilo; il token va solo a discord.com, nome in cache in `state.json`). Se non c'è
+  un bot: la descrizione breve del profilo (`profile.yaml`), altrimenti il nome del profilo con la maiuscola
+  («creads» → «Creads»); «Hermes» solo per `default` quando non si sa altro. `agents.<profilo>.name` vince sempre.
+- **Tasti**: prima quelli scelti in `agents.<profilo>.key`, poi i liberi in ordine: `default` per primo (tasto 0),
+  poi gli altri profili in ordine alfabetico.
+- Approvazioni native → scheda `request` (+ `status: calling` + vibrazione), al massimo 3 opzioni:
+  «Sì, solo ora» · «Sì, per la sessione» (oppure «Sì, sempre») · «No». API: `/v1/runs/{id}/approval`
+  (`once`/`session`/`always`/`deny`). ACP: `session/request_permission` (opzioni `allow_once`, `allow_session`,
+  `allow_always`, `deny`); la `choice` del dispositivo risponde alla richiesta. Hermes aspetta 60 s, poi rifiuta da sé:
+  dopo, la scheda non è più valida.
+- Istruzioni Hikaro (risposte brevi, blocco ```` ```hikaro ````): via API vanno in `instructions` a ogni messaggio;
+  via ACP (che non ha un campo apposta) all'inizio del primo messaggio di ogni conversazione e ogni 8 messaggi.
+- Una conversazione fissa del Deck per agente; via API la cronologia arriva da `/api/sessions/{id}/messages`,
+  via ACP la tiene Hermes nella sessione ACP (salvata nello `state.db` del profilo, sopravvive ai riavvii).
 
 ## Conversazioni (sottochat Discord)
 
 Ogni agente (bot = profilo Hermes) può avere molte conversazioni: le sottochat aperte su Discord e quella del Deck.
 Per ogni agente il connettore ricorda quale usare (`session.select`), salvato in `~/.hikaro/state.json`:
 - `"deck"` (predefinito): una conversazione propria del Deck, con la stessa memoria a lungo termine dell'agente;
-- `"latest"`: segue la sottochat Discord più recente di quell'agente (`/api/sessions?source=discord`);
+- `"latest"`: segue la sottochat Discord più recente di quell'agente;
 - un id: quella conversazione precisa.
-I messaggi mandati dal Deck entrano nella conversazione di Hermes (l'agente se li ricorda), ma non compaiono
-come messaggi nel canale Discord.
+
+Agenti via **API**: l'elenco viene da `/api/sessions?source=discord` (con multiplex, tolte quelle degli altri profili)
+e i messaggi mandati dal Deck entrano proprio in quella conversazione di Hermes (l'agente se li ricorda), ma non
+compaiono come messaggi nel canale Discord.
+
+Agenti via **ACP**: l'elenco viene letto in sola lettura dallo `state.db` di Hermes (quello del profilo, e con multiplex
+quello di `default`, righe `agent:<profilo>:discord:…`). ACP non può riaprire una conversazione Discord, quindi
+**i messaggi del Deck restano in una sottochat collegata**: la prima volta il connettore crea una sessione ACP legata a
+quella sottochat (salvata in `state.json`) e le passa, ben delimitati, gli ultimi ~20 messaggi della sottochat Discord;
+ai messaggi successivi aggiunge solo quelli nuovi arrivati su Discord. Su Discord non cambia niente, e quello che si dice
+dal Deck non torna nella sottochat Discord.
 
 Dettagli dell'implementazione: in `sessions.items` la prima voce è sempre `{ id: "deck", title: "Chat del Deck",
 source: "deck", updated }` (`updated` = 0 se mai usata); poi le sottochat con `title` = nome del thread (o titolo/anteprima

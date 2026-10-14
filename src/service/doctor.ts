@@ -1,7 +1,9 @@
 /** `hikaro-connector doctor` and `status` — read-only checks, plain Italian. */
 import { existsSync, statSync } from "node:fs";
 import { request } from "node:http";
-import { LAUNCHD_LABEL, VERSION, loadConfig, macName, type Config } from "../config.js";
+import { LAUNCHD_LABEL, StateStore, VERSION, loadConfig, macName, type Config } from "../config.js";
+import { hermesBackend } from "../app.js";
+import { acpHandshake, hasModelProvider, hermesAcpCommand } from "../hermes/acp.js";
 import { HermesClient } from "../hermes/client.js";
 import { isMultiplexOn, listProfiles, resolveEndpoints } from "../hermes/profiles.js";
 import { lanIPv4, tailscaleHost } from "../pairing/network.js";
@@ -78,24 +80,45 @@ export async function runDoctor(): Promise<number> {
   if (existsSync(cfg.hermesHome)) {
     const profiles = listProfiles(cfg.hermesHome);
     ok(`Profili Hermes: ${profiles.map((p) => `${p.name}${p.api.enabled ? `(API:${p.api.port ?? 8642})` : "(API spenta)"}`).join(", ")}`);
-    if (isMultiplexOn(cfg.hermesHome)) warn("multiplex_profiles attivo: raggiungibile solo il profilo default");
-    const eps = resolveEndpoints({
-      hermesHome: cfg.hermesHome,
-      hermesUrl: cfg.hermesUrl,
-      hermesApiKey: cfg.hermesApiKey,
-      overrides: cfg.agentOverrides,
-    });
-    if (!eps.length) fail("Nessun agente raggiungibile", "Esegui: hikaro-connector setup");
-    for (const e of eps) {
-      const c = new HermesClient(e.url, e.key);
-      if (!(await c.health())) {
-        fail(`Agente ${e.name} (profilo ${e.profile}): Hermes non risponde su ${e.url}`, `Avvia il gateway: hermes ${e.profile === "default" ? "" : `-p ${e.profile} `}gateway start`);
-      } else if (!e.key) {
-        fail(`${e.name}: manca API_SERVER_KEY`, "Esegui: hikaro-connector setup");
-      } else if (!(await c.checkAuth())) {
-        fail(`${e.name}: Hermes rifiuta la chiave`, "Esegui: hikaro-connector setup");
+    if (isMultiplexOn(cfg.hermesHome)) info("multiplex_profiles attivo: i profili senza API parlano col connettore via ACP (hermes -p <profilo> acp)");
+    const router = await hermesBackend(cfg, new StateStore(cfg.paths.stateFile));
+    const routes = await router.discover();
+    if (!routes.length) fail("Nessun agente trovato", "Crea un profilo in Hermes, poi: hikaro-connector setup");
+    const eps = new Map(resolveEndpoints({ hermesHome: cfg.hermesHome, hermesUrl: cfg.hermesUrl, hermesApiKey: cfg.hermesApiKey, overrides: cfg.agentOverrides }).map((e) => [e.id, e]));
+    // ACP handshakes in parallel (each starts Python: a few seconds).
+    const acpChecks = new Map(
+      routes
+        .filter((r) => r.via === "acp" && hermesBin)
+        .map((r) => [r.id, acpHandshake(hermesAcpCommand(hermesBin!, cfg.hermesHome, r.profile), 90_000)] as const),
+    );
+    for (const r of routes) {
+      const label = `Agente «${r.name}» (profilo ${r.profile}, ${r.via.toUpperCase()})`;
+      if (r.via === "api") {
+        const e = eps.get(r.id);
+        const c = e ? new HermesClient(e.url, e.key) : null;
+        if (!e || !c || !(await c.health())) {
+          fail(`${label}: Hermes non risponde su ${e?.url ?? "?"}`, `Avvia il gateway: hermes ${r.profile === "default" ? "" : `-p ${r.profile} `}gateway start`);
+        } else if (!e.key) {
+          fail(`${label}: manca API_SERVER_KEY`, "Esegui: hikaro-connector setup");
+        } else if (!(await c.checkAuth())) {
+          fail(`${label}: Hermes rifiuta la chiave`, "Esegui: hikaro-connector setup");
+        } else {
+          ok(`${label}: Hermes risponde su ${e.url}`);
+        }
+        continue;
+      }
+      const check = acpChecks.get(r.id);
+      if (!check) {
+        fail(`${label}: Hermes non trovato`, "Installa Hermes Agent, poi: hikaro-connector setup");
+        continue;
+      }
+      const hs = await check;
+      if (!hs.ok) {
+        fail(`${label}: Hermes ACP non risponde`, `Prova: hermes -p ${r.profile} acp --check   (${(hs.error ?? "").slice(0, 160)})`);
+      } else if (!hasModelProvider(hs.init)) {
+        fail(`${label}: Hermes risponde ma non ha un modello configurato`, `Nel Terminale: hermes -p ${r.profile} model`);
       } else {
-        ok(`Agente ${e.name} (profilo ${e.profile}): Hermes risponde su ${e.url}`);
+        ok(`${label}: Hermes risponde (ACP ${hs.init?.agentInfo?.version ?? ""}, ${(hs.ms / 1000).toFixed(1)} s)`.replace(" ,", ","));
       }
     }
   } else {
